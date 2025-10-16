@@ -8,42 +8,67 @@ use std::convert::TryInto;
 const MSG_PING: u16 = 1;
 const MSG_ACK:  u16 = 100;
 
-async fn process_lines(socket: TcpStream) {
-    let (r, mut w) = socket.into_split();
-    let mut lines = BufReader::new(r).lines();
-
-    while let Ok(Some(line)) = lines.next_line().await {
-        let _ = w.write_all(format!("ACK: {line}\n").as_bytes()).await;
-    }
-}
-
 async fn process(mut socket: TcpStream) -> anyhow::Result<()> {
-   let mut buf = BytesMut::with_capacity(16 * 1024);
-   loop {
+    let mut buf = BytesMut::with_capacity(16 * 1024);
+
+    let addr = socket.peer_addr()?;
+    println!("\n📡 Started session with client {addr}");
+
+    loop {
+        // =============== READ ===============
         let n = socket.read_buf(&mut buf).await?;
-        if n == 0 {break;} // peer closed the connection
+        if n == 0 {
+            println!("❌ Client {addr} disconnected");
+            break;
+        }
+        println!("🟦 Received {n} bytes from {addr} (total buffered: {})", buf.len());
 
-        while buf.len() >= 6 {
-            let len = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
-            if buf.len() < len + 4 {break;}
+        // =============== DECODE ===============
+        loop {
+            if buf.len() < 4 { break; }
 
-            let mut frame = buf.split_to(4 + len).freeze();
-            let cmd = u32::from_le_bytes(frame[0..4].try_into().unwrap());
+            let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+            if buf.len() < 4 + payload_len { break; }
+
+            let mut frame = buf.split_to(4 + payload_len);
             frame.advance(4); // drop length
 
-            let msg_type = u16::from_le_bytes([frame.get_u8(), frame.get_u8()]);
-            let payload = frame; // remaining bytes
+            if frame.len() < 4 {
+                println!("⚠️  Malformed frame (too short for headers)");
+                continue;
+            }
 
+            let msg_type = frame.get_u16_le();
+            let body_len = frame.get_u16_le() as usize;
+
+            if frame.len() < body_len {
+                println!("⚠️  Malformed frame (body_len={} but only {} left)", body_len, frame.len());
+                continue;
+            }
+
+            let body = frame.split_to(body_len);
+            let body_str = String::from_utf8_lossy(&body);
+
+            println!(
+                "📩 Decoded frame → type: {msg_type}, body_len: {body_len}, body: \"{}\"",
+                body_str
+            );
+
+            // =============== HANDLE ===============
             match msg_type {
                 MSG_PING => {
-                    let _ = payload; // none for ping
+                    println!("🔁 PING received → sending ACK: pong");
                     ack(&mut socket, b"pong").await?;
                 }
-                _ => {ack(&mut socket, b"").await?;}
+                _ => {
+                    println!("❔ Unknown message type {msg_type} → sending empty ACK");
+                    ack(&mut socket, b"").await?;
+                }
             }
         }
-   }
-   Ok(())
+    }
+
+    Ok(())
 }
 
 /// send: [u32 len][u16 MSG_ACK][u16 body_len][body…]
@@ -55,23 +80,25 @@ async fn ack(sock: &mut TcpStream, body: &[u8]) -> anyhow::Result<()> {
     out.put_u16_le(body.len() as u16);
     out.extend_from_slice(body);
     sock.write_all(&out).await?;
+
+    println!("✅ Sent ACK with body: \"{}\"", String::from_utf8_lossy(body));
+    println!("🏁 Message processed and acknowledged\n");
     Ok(())
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind("0.0.0.0:9000").await?;
-    println!("Listening on {}", listener.local_addr()?);
+    println!("🚀 Server listening on {}", listener.local_addr()?);
 
     loop {
         let (socket, addr) = listener.accept().await?;
-        println!("Accepted connection from client: {}", addr);
+        println!("✅ Accepted new client: {addr}");
 
-        tokio::spawn(async move{
-            // Process each socket concurrently
+        tokio::spawn(async move {
             if let Err(e) = process(socket).await {
-                eprintln!("Error processing socket: {e}");
-            };
+                eprintln!("💥 Error processing {addr}: {e}");
+            }
         });
     }
 }
