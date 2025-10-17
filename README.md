@@ -2,6 +2,21 @@
 
 A high-performance Central Limit Order Book (CLOB) engine implemented in Rust with a binary TCP protocol for ultra-low latency order matching.
 
+## Components
+
+#### Engine
+Why spawn a thread at all?
+
+Because your CLOB engine should be deterministic and fast, not async.
+Keeping it in its own thread:
+* avoids the overhead of Tokio tasks,guarantees single-threaded state mutation (no locks), and makes latency predictable.
+* Async I/O (networking) and sync logic (matching) stay cleanly separated.
+
+#### Order Book
+The structure of an order book for a Central Limit Order Book (CLOB) system in Rust typically consists of two primary sides—bids (buy orders) and asks (sell orders)—each organized to allow rapid matching and efficient state querying.
+* Order: Each order generally has an identifier, side (bid/ask), price, quantity, and timestamp for price-time priority matching
+* Price Levels: Bids are sorted by descending price; asks by ascending price. Within each price level, orders are sorted by time (FIFO) for fair matching.
+
 ## 🏗️ Architecture
 
 - **Rust Engine**: Core CLOB matcher running as a TCP server with binary protocol
@@ -64,6 +79,62 @@ A high-performance Central Limit Order Book (CLOB) engine implemented in Rust wi
 ──────────────────────────────────────────────────────────────────────────────
    ACK → TRADE → BOOK_DELTA frames
 ──────────────────────────────────────────────────────────────────────────────
+```
+
+## Tasks & Threads
+
+#### What is Tokio Tasks?
+- Is not a real OS thread.
+- Its a lightweight async job that runs on top of few worker threads managed by the tokio runtime.
+- Tokio tasks handles thousands of sockets and network I/O (async, concurent, efficient)
+
+#### What is Threads?
+- A thread is managed by our OS (Linux, Windows, macOS)
+- Each thread gets its own stack, registers, and scheduling by the kernal.
+- So our CLOB Engine runs its own dedicated thread because it 
+    - needs predicatable CPU time
+    - should not yield to other async tasks
+    - and wants deterministic single threaded order processing
+- Our engine thread handles matching logic in strict sequence (sync, deterministic, single core)
+
+#### Why our design uses both?
+
+If everything was async (Tokio-only)
+- Matching engine would have to use async locks or channels.
+- We’d risk nondeterministic timing (bad for exchanges).
+- Harder to benchmark and reason about “what order executed first.”
+
+If everything was threads (no Tokio)
+- We’d have to spawn a thread per connection (expensive).
+- 1000 clients = 1000 threads = lots of OS overhead.
+- Blocking I/O would kill scalability.
+
+By combining both:
+- We get async scalability for networking, and deterministic precision for your core logic.
+
+| Part            | Runs where                                     | Why                                                                              |
+| --------------- | ---------------------------------------------- | -------------------------------------------------------------------------------- |
+| **TCP Gateway** | **Tokio runtime**                              | Each client connection is an async `tokio::spawn` task handling I/O efficiently. |
+| **CLOB Engine** | **Dedicated OS thread** (`std::thread::spawn`) | Pure sync logic; deterministic matching; no async waits.                         |
+
+```
+               ┌──────────────────────────────────────────────────┐
+               │                 Tokio Runtime                    │
+               │    (few OS threads, many lightweight tasks)      │
+               │                                                  │
+client A ─────►│ tokio::spawn(task for conn A)                    │
+client B ─────►│ tokio::spawn(task for conn B)                    │
+client C ─────►│ tokio::spawn(task for conn C)                    │
+               │             │                                   │
+               └─────────────┼───────────────────────────────────┘
+                             │ tx_cmd.send(Command)
+                             ▼
+                 ┌──────────────────────────────┐
+                 │  Engine thread (std::thread) │
+                 │  - rx_cmd.recv()             │
+                 │  - match & update book       │
+                 │  - sink.send(Event)          │
+                 └──────────────────────────────┘
 ```
 
 ## 📁 Project Structure
