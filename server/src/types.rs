@@ -7,7 +7,7 @@ enum Side {
 
 struct Order {
     id: u64,
-    client_id: u64,
+    cl_id: u64,
     side: Side,
     price: u64,
     qty: u64,
@@ -21,3 +21,29 @@ struct OrderBook {
 }
 
 impl Default for OrderBook {fn default() -> Self {Self{bids:BTreeMap::new(), asks:BTreeMap::new(), lookup:HashMap::new()}}}
+
+// Action from engine → gateway → client
+// send the same event to the requesting client and
+// also broadcast it to market-data subscribers (another channel).
+#[derive(Debug, Clone)]
+enum Event {
+    Ack {ord_id: u64}, // I got your command
+    Reject {ord_id: u64, reason: &'static str}, // Couldn't do it
+    Trade {price: u64, qty: u64, taker_cl_id: u64, maker_cl_id: u64}, // A fill happened
+    BookDelta {side: Side, price: u64, level_qty: u64}, // This price level changed
+}
+
+// Action from gateway → engine
+enum Command {
+    // Place a new order and tell results back through this Sender<Event>
+    Order(Order, crossbeam::channel::Sender<Event>),
+    // Cancel a specific client order; send result via 'sink'
+    Cancel {cl_id: u64, ord_id: u64, sink: crossbeam::channel:Sender<Event>},
+}
+
+/*
+Why include the Sender<Event> inside the command?
+Because your engine runs in a separate thread and handles many clients. 
+Passing the sink makes the engine connection-aware without global maps or locks. 
+It can emit client-specific responses without guessing where to send them.
+*/
