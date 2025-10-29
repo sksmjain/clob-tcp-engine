@@ -2,27 +2,9 @@
 const net = require("node:net");
 const readline = require("node:readline");
 const { argv } = require("node:process");
+const { buildFrame } = require("../helpers");
+const { host, port, localPort } = require("../config");
 
-// ---------- CLI args ----------
-const args = Object.fromEntries(
-  argv.slice(2).map(a => {
-    const [k, v] = a.replace(/^--/, "").split("=");
-    return [k, v ?? true];
-  })
-);
-
-const host = args.host || "127.0.0.1";
-const port = parseInt(args.port || "9000", 10);
-const localPort = args.localport ? parseInt(args.localport, 10) : undefined;
-
-// ---------- framing helpers ----------
-const u32 = n => { const b = Buffer.alloc(4); b.writeUInt32LE(n, 0); return b; };
-const u16 = n => { const b = Buffer.alloc(2); b.writeUInt16LE(n, 0); return b; };
-
-function buildFrame(type, bodyBuf) {
-  const payload = Buffer.concat([u16(type), u16(bodyBuf.length), bodyBuf]);
-  return Buffer.concat([u32(payload.length), payload]);
-}
 
 // ---------- connect ----------
 const socket = net.createConnection({ host, port, localPort }, () => {

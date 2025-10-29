@@ -5,33 +5,8 @@
  */
 
 const net = require("node:net");
-const { argv } = require("node:process");
+const { buildFrame } = require("./helpers");
 
-// ---------------- CLI ----------------
-const args = Object.fromEntries(
-  argv.slice(2).map(a => {
-    const [k, v] = a.replace(/^--/, "").split("=");
-    return [k, v ?? true];
-  })
-);
-
-const host = args.host || "127.0.0.1";   // server host
-const port = parseInt(args.port || "9000", 10); // server port
-const clients = parseInt(args.clients || "5", 10); // number of clients
-const intervalMs = parseInt(args.interval || "5000", 10); // per-client period
-const durationSec = args.duration ? parseInt(args.duration, 10) : null; // optional test duration
-const typeDefault = parseInt(args.type || "1", 10); // msg type (1 = PING)
-const localPortStart = args["local-port-start"] ? parseInt(args["local-port-start"], 10) : null; // optional fixed local ports
-const quiet = !!args.quiet;
-
-// ------------- framing helpers -------------
-const u32 = n => { const b = Buffer.alloc(4); b.writeUInt32LE(n, 0); return b; };
-const u16 = n => { const b = Buffer.alloc(2); b.writeUInt16LE(n, 0); return b; };
-
-function buildFrame(type, bodyBuf) {
-  const payload = Buffer.concat([u16(type), u16(bodyBuf.length), bodyBuf]);
-  return Buffer.concat([u32(payload.length), payload]);
-}
 
 // simple framed reader that resolves frames in order
 function makeFramedReader(socket, onFrame) {
