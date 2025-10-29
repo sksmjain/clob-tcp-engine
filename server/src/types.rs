@@ -1,21 +1,23 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use crossbeam::channel::Sender;
 
-enum Side {
+#[derive(Debug, Clone)]
+pub enum Side {
     Bid,
     Ask
 }
 
-struct Order {
-    id: u64,
-    cl_id: u64,
-    side: Side,
-    price: u64,
-    qty: u64,
-    timestamp: u64
+pub struct Order {
+    pub id: u64,
+    pub cl_id: u64,
+    pub side: Side,
+    pub price: u64,
+    pub qty: u64,
+    pub timestamp: u64
 }
 
-struct OrderBook {
-    bids: BTreeMap<u64, VecDeque(Order)>>, // Descending for bids
+pub struct OrderBook {
+    bids: BTreeMap<u64, VecDeque<Order>>, // Descending for bids
     asks: BTreeMap<u64, VecDeque<Order>>, // Ascending for asks
     lookup: HashMap<u64, (Side, u64)>, // Fast lookup by IDs: (Side, price)
 }
@@ -26,8 +28,8 @@ impl Default for OrderBook {fn default() -> Self {Self{bids:BTreeMap::new(), ask
 // send the same event to the requesting client and
 // also broadcast it to market-data subscribers (another channel).
 #[derive(Debug, Clone)]
-enum Event {
-    Ack {ord_id: u64}, // I got your command
+pub enum Event {
+    Ack {ord_id: u64, note: &'static str }, // I got your command
     Reject {ord_id: u64, reason: &'static str}, // Couldn't do it
     Trade {price: u64, qty: u64, taker_cl_id: u64, maker_cl_id: u64}, // A fill happened
     BookDelta {side: Side, price: u64, level_qty: u64}, // This price level changed
@@ -35,11 +37,11 @@ enum Event {
 }
 
 // Action from gateway → engine
-enum Command {
+pub enum Command {
     // Place a new order and tell results back through this Sender<Event>
     Order(Order, crossbeam::channel::Sender<Event>),
     // Cancel a specific client order; send result via 'sink'
-    Cancel {cl_id: u64, ord_id: u64, sink: crossbeam::channel:Sender<Event>},
+    Cancel {cl_id: u64, ord_id: u64, sink: crossbeam::channel::Sender<Event>},
     // Just a ping
     Ping(Sender<Event>),
 }

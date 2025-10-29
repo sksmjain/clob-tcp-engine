@@ -1,4 +1,15 @@
+use tokio::{
+    io::{AsyncReadExt},
+    net::{TcpStream, TcpListener}
+};
 use crossbeam::channel::{bounded, Receiver, Sender};
+use bytes::{BytesMut, Buf};
+use tracing::{error, info};
+use std::thread;
+mod types;
+mod engine;
+use crate::types::{Command, Event};
+use crate::engine::{run_engine};
 
 // ========================== Protocol ==========================
 
@@ -27,12 +38,15 @@ async fn process(mut socket: TcpStream,
 
         // 2) Parse all complete frames
         while buf.len() >= 6 {
-            let len = u32::from_le_bytes(buf[0..4].try_into().unwrap() as usize);
-            if buf.len() < 4 + len {
-                break; // incomplete
+            // Read 4 bytes into [u8; 4], then convert to u32 and then usize
+            let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+            // Now both sides are usize
+            if buf.len() < 4 + payload_len {
+                break; // incomplete frame
             }
+            // Split_to takes usize, so no more casting needed
             let mut frame = buf.split_to(4 + payload_len);
-            frame.advance(4);
+            frame.advance(4); // skip the length prefix
 
             let msg_type = frame.get_u16_le();
             let body_len = frame.get_u16_le() as usize;
@@ -91,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
                 error!("conn error: {e:#}");
             }
             info!("client disconnected: {peer}");
-        })
+        });
 
     }
 }
