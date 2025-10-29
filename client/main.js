@@ -1,7 +1,24 @@
+// main.js
 const net = require("node:net");
+const fs = require("node:fs");
 const readline = require("node:readline");
 const { host, port, localPort } = require("./config");
 const { buildFrame, u64, i64 } = require("./helpers");
+
+// ---------------- CLI args ----------------
+const args = Object.fromEntries(
+  process.argv.slice(2).map(a => {
+    const [k, v] = a.replace(/^--/, "").split("=");
+    return [k, v ?? true];
+  })
+);
+const TEST_MODE = !!args.test;
+const TEST_FILE =
+  (typeof args.test === "string" && args.test) ||
+  args.file ||
+  "orders.txt";
+const SLEEP_MS = args.sleep ? Number(args.sleep) : 0;
+const LOOP = !!args.loop;
 
 // ---------- encoders & frames ----------
 function ping() { return buildFrame(1); }
@@ -9,7 +26,7 @@ function newOrder({ client_id, cl_ord_id, side, price, qty, tif }) {
   const payload = Buffer.concat([
     u64(client_id),
     u64(cl_ord_id),
-    Buffer.from([side]),          // 0=buy, 1=sell
+    Buffer.from([side]),          // 0=bid, 1=ask
     i64(price),
     i64(qty),
     Buffer.from([tif]),           // 0=GTC, 1=IOC
@@ -25,9 +42,9 @@ function cancel({ client_id, cl_ord_id }) {
 function toSide(v) {
   if (v === undefined) throw new Error("side is required");
   const s = String(v).toLowerCase();
-  if (s === "0" || s === "buy")  return 0;
-  if (s === "1" || s === "sell") return 1;
-  throw new Error("side must be buy|sell|0|1");
+  if (s === "0" || s === "bid"  || s === "buy")  return 0;
+  if (s === "1" || s === "ask"  || s === "sell") return 1;
+  throw new Error("side must be bid|ask|0|1");
 }
 function toTif(v) {
   if (v === undefined) throw new Error("tif is required");
@@ -48,15 +65,15 @@ function parseKV(tokens) {
 const HELP = `
 Commands:
   ping
-  new client=<u64> id=<u64> side=<buy|sell|0|1> price=<i64> qty=<i64> tif=<gtc|ioc|0|1>
+  new client=<u64> id=<u64> side=<bid|ask|0|1> price=<i64> qty=<i64> tif=<gtc|ioc|0|1>
   cancel client=<u64> id=<u64>
   help
   quit | :q | exit
 
 Examples:
   ping
-  new client=2 id=2001 side=sell price=101000 qty=5000 tif=gtc
-  new client=3 id=3001 side=buy  price=101000 qty=2000 tif=ioc
+  new client=2 id=2001 side=ask price=101000 qty=5000 tif=gtc
+  new client=3 id=3001 side=bid price=101000 qty=2000 tif=ioc
   cancel client=2 id=2001
 `;
 
@@ -65,9 +82,12 @@ const connectOpts = { host, port };
 if (typeof localPort === "number") connectOpts.localPort = localPort;
 
 console.log("\n===============================");
-console.log("\x1b[36m🚀 CLOB TCP Client (interactive)\x1b[0m");
+console.log("\x1b[36m🚀 CLOB TCP Client\x1b[0m", TEST_MODE ? "(test mode)" : "(interactive)");
 console.log("===============================");
 console.log(`→ Target: ${host}:${port}`);
+if (TEST_MODE) {
+  console.log(`→ File: ${TEST_FILE}  |  Sleep: ${SLEEP_MS}ms  |  Loop: ${LOOP ? "yes" : "no"}`);
+}
 console.log("===============================\n");
 
 const socket = net.createConnection(connectOpts, () => {
@@ -75,38 +95,39 @@ const socket = net.createConnection(connectOpts, () => {
   console.log(`✅ Connected (local ${local.address}:${local.port}) → ${host}:${port}`);
   socket.setNoDelay(true);
   socket.setKeepAlive(true, 10_000);
-  console.log(HELP.trim() + "\n");
-  rl.prompt();
+
+  if (TEST_MODE) {
+    runFile(TEST_FILE, { sleepMs: SLEEP_MS, loop: LOOP });
+  } else {
+    console.log(HELP.trim() + "\n");
+    rl.prompt();
+  }
 });
 
-// ---------- stdin REPL ----------
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  prompt: "\x1b[33mclob>\x1b[0m ",
-});
+// ---------- shared command handler ----------
+function handleCommand(text) {
+  const line = String(text || "").trim();
+  if (!line || line.startsWith("#")) return; // allow comments in files
 
-rl.on("line", (line) => {
-  const text = line.trim();
-  if (!text) return rl.prompt();
-
-  if (text === "quit" || text === ":q" || text === "exit") {
+  if (line === "quit" || line === ":q" || line === "exit") {
     gracefulClose();
     return;
   }
-  if (text === "help" || text === "?") {
+  if (line === "help" || line === "?") {
     console.log(HELP.trim());
-    return rl.prompt();
+    if (!TEST_MODE) rl.prompt();
+    return;
   }
 
-  const [cmdRaw, ...rest] = text.split(/\s+/);
-  const cmd = cmdRaw.toLowerCase();
+  const [cmdRaw, ...rest] = line.split(/\s+/);
+  const cmd = (cmdRaw || "").toLowerCase();
 
   try {
     if (cmd === "ping") {
       console.log("📤 \x1b[34mPING\x1b[0m");
       socket.write(ping());
-      return rl.prompt();
+      if (!TEST_MODE) rl.prompt();
+      return;
     }
 
     if (cmd === "new" || cmd === "order" || cmd === "neworder") {
@@ -121,13 +142,14 @@ rl.on("line", (line) => {
       console.log("📤 \x1b[34mNEW_ORDER\x1b[0m", {
         client_id: client_id.toString(),
         cl_ord_id: cl_ord_id.toString(),
-        side: side === 0 ? "BUY" : "SELL",
+        side: side === 0 ? "BID" : "ASK",
         price: price.toString(),
         qty: qty.toString(),
         tif: tif === 0 ? "GTC" : "IOC",
       });
       socket.write(newOrder({ client_id, cl_ord_id, side, price, qty, tif }));
-      return rl.prompt();
+      if (!TEST_MODE) rl.prompt();
+      return;
     }
 
     if (cmd === "cancel") {
@@ -139,22 +161,66 @@ rl.on("line", (line) => {
         cl_ord_id: cl_ord_id.toString(),
       });
       socket.write(cancel({ client_id, cl_ord_id }));
-      return rl.prompt();
+      if (!TEST_MODE) rl.prompt();
+      return;
     }
 
     console.log(`\x1b[31mUnknown command:\x1b[0m ${cmd}`);
-    console.log(HELP.trim());
-    rl.prompt();
+    if (!TEST_MODE) {
+      console.log(HELP.trim());
+      rl.prompt();
+    }
   } catch (e) {
     console.error("\x1b[31mInput error:\x1b[0m", e.message);
-    rl.prompt();
+    if (!TEST_MODE) rl.prompt();
   }
-});
+}
 
-rl.on("SIGINT", () => {
-  // Ctrl+C in the REPL
-  gracefulClose();
-});
+// ---------- interactive REPL (only created for interactive mode) ----------
+let rl = null;
+if (!TEST_MODE) {
+  rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: "\x1b[33mclob>\x1b[0m ",
+  });
+
+  rl.on("line", handleCommand);
+  rl.on("SIGINT", gracefulClose); // Ctrl+C
+}
+
+// ---------- test runner ----------
+async function runFile(path, { sleepMs = 0, loop = false } = {}) {
+  if (!fs.existsSync(path)) {
+    console.error(`\x1b[31mTest file not found:\x1b[0m ${path}`);
+    gracefulClose(1);
+    return;
+  }
+  console.log(`▶️  Running test file: ${path}`);
+
+  const runOnce = () =>
+    new Promise((resolve, reject) => {
+      const rls = readline.createInterface({
+        input: fs.createReadStream(path),
+        crlfDelay: Infinity,
+      });
+
+      rls.on("line", async (line) => {
+        handleCommand(line);
+        if (sleepMs > 0) await new Promise(r => setTimeout(r, sleepMs));
+      });
+      rls.once("close", resolve);
+      rls.once("error", reject);
+    });
+
+  do {
+    await runOnce();
+    if (loop) console.log("↩️  Looping test file...");
+  } while (loop);
+
+  console.log("✅ Test file completed.");
+  gracefulClose(0);
+}
 
 // ---------- receive & decode frames ----------
 let buf = Buffer.alloc(0);
@@ -192,7 +258,7 @@ socket.on("data", (chunk) => {
         mak: mak.toString(),
       });
     } else if (type === 102) { // BOOK_DELTA
-      const side  = body.readUInt8(2) === 0 ? "BUY" : "SELL";
+      const side  = body.readUInt8(2) === 0 ? "BID" : "ASK";
       const price = body.readBigInt64LE(3);
       const lvl   = body.readBigInt64LE(11);
       console.log("📊 \x1b[36mBOOK_DELTA\x1b[0m", {
@@ -206,7 +272,7 @@ socket.on("data", (chunk) => {
 
     buf = buf.subarray(4 + len);
   }
-  rl.prompt();
+  if (!TEST_MODE && rl) rl.prompt();
 });
 
 // ---------- lifecycle ----------
@@ -222,6 +288,6 @@ socket.on("close", () => {
 
 function gracefulClose(code = 0) {
   try { socket.end(); } catch {}
-  try { rl.close(); } catch {}
+  try { if (rl) rl.close(); } catch {}
   process.exit(code);
 }
