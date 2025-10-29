@@ -4,6 +4,17 @@ A high-performance Central Limit Order Book (CLOB) engine implemented in Rust wi
 
 ## Components
 
+#### Client
+In our CLOB system, the Client is not just a “user terminal.”
+It’s a network participant — the entry point for traders, bots, or external systems to communicate directly with the matching engine.
+
+It speaks to our binary TCP protocol directly, giving it ultra-low latency and deterministic message delivery — unlike REST or WebSocket APIs, which are layered over HTTP.
+
+Each client can:
+* Connect to the server via IP/port (using Node.js net or any TCP library).
+* Send framed messages such as PING, NEW_ORDER, or CANCEL.
+* Receive events like ACK, REJECT, TRADE, and BOOK_DELTA from the engine.
+
 #### Engine
 Why spawn a thread at all?
 
@@ -13,6 +24,8 @@ Keeping it in its own thread:
 * Async I/O (networking) and sync logic (matching) stay cleanly separated.
 
 #### Order Book
+our engine runs as a single-threaded loop (run_engine), and inside it we maintain an in-memory data structure called the OrderBook. This OrderBook is where all live (resting) limit orders are stored until they’re either matched, canceled, or expired.
+
 The structure of an order book for a Central Limit Order Book (CLOB) system in Rust typically consists of two primary sides—bids (buy orders) and asks (sell orders)—each organized to allow rapid matching and efficient state querying.
 * Order: Each order generally has an identifier, side (bid/ask), price, quantity, and timestamp for price-time priority matching
 * Price Levels: Bids are sorted by descending price; asks by ascending price. Within each price level, orders are sorted by time (FIFO) for fair matching.
@@ -167,9 +180,27 @@ The server will start listening on `0.0.0.0:9000`.
 
 ### Testing with the Client
 
+Interactive CLI client (recommended):
+
 ```bash
 cd client
 node main.js
+```
+
+Then type commands:
+
+```
+ping
+new client=2 id=2001 side=sell price=101000 qty=5000 tif=gtc
+new client=3 id=3001 side=buy  price=101000 qty=2000 tif=ioc
+cancel client=2 id=2001
+help
+```
+
+Load-test client (multi-connection ping/ack):
+
+```bash
+node test.js --clients=50 --interval=1000 --duration=30
 ```
 
 ## 📡 Binary Protocol
@@ -179,15 +210,26 @@ The engine uses a length-prefixed binary protocol for optimal performance:
 ### Message Format
 ```
 [u32 length][u16 message_type][u16 body_length][body...]
+
+Where:
+- length = bytes of the payload (from message_type to end of body)
+- body_length = bytes in body following the 4-byte header (type + body_length)
 ```
 
 ### Message Types
-- `MSG_PING (1)`: Ping message
-- `MSG_ACK (100)`: Acknowledgment response
+- `1  (PING)`: Ping message (no body)
+- `10 (NEW_ORDER)`: Body = `[u64 client_id][u64 cl_ord_id][u8 side][i64 price][i64 qty][u8 tif]`
+- `11 (CANCEL)`: Body = `[u64 client_id][u64 cl_ord_id]`
+
+Events (engine → client):
+- `100 (ACK)`: Body = `[u64 cl_ord_id][u16 text_len][text...]` (may carry "pong")
+- `101 (TRADE)`: Body = `[i64 price][i64 qty][u64 taker_cl_id][u64 maker_cl_id]`
+- `102 (BOOK_DELTA)`: Body = `[u8 side][i64 price][i64 level_qty]`
+- `199 (REJECT)`: Body = `[u64 cl_ord_id][u16 reason_len][reason...]`
 
 ### Example Flow
-1. Client sends ping: `[4][0][1][0][0][0]` (length=4, type=1, no body)
-2. Server responds: `[8][0][100][0][4][0][112][111][110][103]` (ACK with "pong")
+1. Client sends `PING`
+2. Server responds `ACK` with text "pong"
 
 ## 🔧 Development
 
@@ -195,11 +237,13 @@ The engine uses a length-prefixed binary protocol for optimal performance:
 - **tokio**: Async runtime with networking
 - **anyhow**: Error handling
 - **bytes**: Efficient byte buffer manipulation
+- **hdrhistogram**: Latency histogram (p50/p95/p99) reporter
 
 ### Key Features
 - **Concurrent Processing**: Each client connection handled in separate task
 - **Buffer Management**: Efficient binary frame parsing with `BytesMut`
 - **Protocol Parsing**: Length-prefixed message handling with proper bounds checking
+- **Latency Metrics**: Background task reports p50/p95/p99 every few seconds
 
 ### Future Enhancements
 - **WAL (Write-Ahead Log)**: Append-only log for recovery and determinism
