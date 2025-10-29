@@ -1,5 +1,11 @@
 
 
-// sx_cmd: Used by our async TCP handlers to send new orders or cancels to the engine.
-// rx_cmd: Owned by the engine thread; it receives one Command at a time.
-let (sx_cmd, rx_cmd) = crossbeam::channel::unbound::<Command>();
+
+
+fn handle_new(nO: Order, b: OrderBook, sink: $Sender<Event>) {
+
+}
+
+fn handle_cancel(cl_id: u64, b: &mut OrderBook, tx_md) -> bool {
+
+}
