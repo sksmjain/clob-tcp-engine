@@ -1,10 +1,17 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use crossbeam::channel::Sender;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Bid,
     Ask
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum Tif {
+    Gtc,
+    Ioc,
 }
 
 pub struct Order {
@@ -13,13 +20,15 @@ pub struct Order {
     pub side: Side,
     pub price: u64,
     pub qty: u64,
-    pub timestamp: u64
+    #[allow(dead_code)]
+    pub timestamp: u64,
+    pub tif: Tif,
 }
 
 pub struct OrderBook {
-    bids: BTreeMap<u64, VecDeque<Order>>, // Descending for bids
-    asks: BTreeMap<u64, VecDeque<Order>>, // Ascending for asks
-    lookup: HashMap<u64, (Side, u64)>, // Fast lookup by IDs: (Side, price)
+    pub bids: BTreeMap<u64, VecDeque<Order>>, // Descending for bids
+    pub asks: BTreeMap<u64, VecDeque<Order>>, // Ascending for asks
+    pub lookup: HashMap<u64, (Side, u64)>, // Fast lookup by IDs: (Side, price)
 }
 
 impl Default for OrderBook {fn default() -> Self {Self{bids:BTreeMap::new(), asks:BTreeMap::new(), lookup:HashMap::new()}}}
@@ -28,6 +37,7 @@ impl Default for OrderBook {fn default() -> Self {Self{bids:BTreeMap::new(), ask
 // send the same event to the requesting client and
 // also broadcast it to market-data subscribers (another channel).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Event {
     Ack {ord_id: u64, note: &'static str }, // I got your command
     Reject {ord_id: u64, reason: &'static str}, // Couldn't do it
@@ -37,6 +47,7 @@ pub enum Event {
 }
 
 // Action from gateway → engine
+#[allow(dead_code)]
 pub enum Command {
     // Place a new order and tell results back through this Sender<Event>
     Order(Order, crossbeam::channel::Sender<Event>),

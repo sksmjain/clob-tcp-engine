@@ -6,19 +6,23 @@ use crossbeam::channel::{bounded, Receiver, Sender};
 use bytes::{BytesMut, Buf};
 use tracing::{error, info};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 mod types;
 mod engine;
-use crate::types::{Command, Event};
+use crate::types::{Command, Event, Order, Side, Tif};
 use crate::engine::run_engine;
 
+use tracing_appender::rolling;
+use tracing_subscriber::fmt;
+
 // ========================== Protocol ==========================
+// Frame: [u32 len][u16 type][u16 body_len][payload...]
+// Side encoding: 0 = BID, 1 = ASK
 
 const MSG_PING: u16 = 1;
 const MSG_NEW_ORDER: u16 = 10;
 const MSG_CANCEL: u16 = 11;
-
-// Frame: [u32 len][u16 type][payload...]
 
 // ========================== Task Process ==========================
 
@@ -68,54 +72,54 @@ async fn process(
             // Get payload body
             let body = frame.split_to(body_len);
             let body_hex = hex::encode(&body);
-            println!(
-                "\n🔎 [FRAME DECODED]
-                    • msg_type: {} ({})
-                    • body_len: {}
-                    • raw_body (hex): {}",
-                msg_type,
-                match msg_type {
-                    MSG_PING => "PING",
-                    MSG_NEW_ORDER => "NEW_ORDER",
-                    MSG_CANCEL => "CANCEL",
-                    _ => "UNKNOWN",
-                },
-                body_len,
-                body_hex
-            );
+            // println!(
+            //     "\n🔎 [FRAME DECODED]
+            //         • msg_type: {} ({})
+            //         • body_len: {}
+            //         • raw_body (hex): {}",
+            //     msg_type,
+            //     match msg_type {
+            //         MSG_PING => "PING",
+            //         MSG_NEW_ORDER => "NEW_ORDER",
+            //         MSG_CANCEL => "CANCEL",
+            //         _ => "UNKNOWN",
+            //     },
+            //     body_len,
+            //     body_hex
+            // );
 
             // Decode payload meaningfully if known type
             match msg_type {
                 MSG_PING => {
-                    println!("💓 [PING] Received ping from {}", peer_addr);
+                    // println!("💓 [PING] Received ping from {}", peer_addr);
+                    // forward to engine so it can respond
+                    if let Err(e) = tx_cmd.send(Command::Ping(sink_to_engine.clone())) {
+                        eprintln!("[gw] failed to send Ping to engine: {e}");
+                    }
                 }
 
                 MSG_NEW_ORDER => {
-                    println!("🟦 [NEW_ORDER] Raw payload len={}", body_len);
+                    // println!("🟦 [NEW_ORDER] Raw payload len={}", body_len);
                     if body_len >= (8 + 8 + 1 + 8 + 8 + 1) {
                         let client_id = u64::from_le_bytes(body[0..8].try_into().unwrap());
                         let cl_ord_id = u64::from_le_bytes(body[8..16].try_into().unwrap());
-                        let side = body[16];
+                        let side = body[16]; // 0=BID, 1=ASK
                         let price = i64::from_le_bytes(body[17..25].try_into().unwrap());
                         let qty = i64::from_le_bytes(body[25..33].try_into().unwrap());
                         let tif = body[33];
-                        println!(
-                            "📦 [DECODE]
-                            → client_id: {}
-                                → cl_ord_id: {}
-                                → side: {} ({})
-                                → price: {}
-                                → qty: {}
-                                → tif: {} ({})",
-                            client_id,
-                            cl_ord_id,
-                            side,
-                            if side == 0 { "BUY" } else { "SELL" },
-                            price,
-                            qty,
-                            tif,
-                            if tif == 0 { "GTC" } else { "IOC" }
-                        );
+                        let order = Order {
+                            id: cl_ord_id,
+                            cl_id: client_id,
+                            side: if side == 0 { Side::Bid } else { Side::Ask },
+                            price: u64::try_from(price).expect("price must be >= 0"),
+                            qty: u64::try_from(qty).expect("qty must be >= 0"),
+                            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
+                            tif: if tif == 0 { Tif::Gtc } else { Tif::Ioc },
+                        };
+            
+                        if let Err(e) = tx_cmd.send(Command::Order(order, sink_to_engine.clone())) {
+                            eprintln!("[gw] failed to send Order to engine: {e}");
+                        }
                     } else {
                         println!("⚠️ [NEW_ORDER] Unexpected payload length: {}", body_len);
                     }
@@ -125,12 +129,12 @@ async fn process(
                     if body_len >= 16 {
                         let client_id = u64::from_le_bytes(body[0..8].try_into().unwrap());
                         let cl_ord_id = u64::from_le_bytes(body[8..16].try_into().unwrap());
-                        println!(
-                            "🟧 [CANCEL]
-                            → client_id: {}
-                            → cl_ord_id: {}",
-                            client_id, cl_ord_id
-                        );
+                        // println!(
+                        //     "🟧 [CANCEL]
+                        //     → client_id: {}
+                        //     → cl_ord_id: {}",
+                        //     client_id, cl_ord_id
+                        // );
                     } else {
                         println!("⚠️ [CANCEL] Invalid payload length: {}", body_len);
                     }
@@ -151,6 +155,15 @@ async fn process(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Tracing setup
+    let file_appender = rolling::hourly("logs", "engine.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_target(false)
+        .with_level(true)
+        .compact()
+        .init();
     // Bind address
     let addr = std::env::var("ADDR").unwrap_or_else(|_| "0.0.0.0:9000".to_string());
     let listener = TcpListener::bind(&addr).await?;
